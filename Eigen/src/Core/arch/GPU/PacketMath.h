@@ -53,6 +53,7 @@ template<> struct packet_traits<float> : default_packet_traits
     HasBetaInc = 1,
 
     HasBlend = 0,
+    HasFloor = 1,
   };
 };
 
@@ -86,12 +87,13 @@ template<> struct packet_traits<double> : default_packet_traits
     HasBetaInc = 1,
 
     HasBlend = 0,
+    HasFloor = 1,
   };
 };
 
 
-template<> struct unpacket_traits<float4>  { typedef float  type; enum {size=4, alignment=Aligned16}; typedef float4 half; };
-template<> struct unpacket_traits<double2> { typedef double type; enum {size=2, alignment=Aligned16}; typedef double2 half; };
+template<> struct unpacket_traits<float4>  { typedef float  type; enum {size=4, alignment=Aligned16, vectorizable=true, masked_load_available=false, masked_store_available=false}; typedef float4 half; };
+template<> struct unpacket_traits<double2> { typedef double type; enum {size=2, alignment=Aligned16, vectorizable=true, masked_load_available=false, masked_store_available=false}; typedef double2 half; };
 
 template<> EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE float4 pset1<float4>(const float&  from) {
   return make_float4(from, from, from, from);
@@ -100,6 +102,10 @@ template<> EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE double2 pset1<double2>(const do
   return make_double2(from, from);
 }
 
+// We need to distinguish ‘clang as the CUDA compiler’ from ‘clang as the host compiler,
+// invoked by NVCC’ (e.g. on MacOS). The former needs to see both host and device implementation
+// of the functions, while the latter can only deal with one of them.
+#if defined(EIGEN_CUDA_ARCH) || defined(EIGEN_HIP_DEVICE_COMPILE) || (defined(EIGEN_CUDACC) && EIGEN_COMP_CLANG && !EIGEN_COMP_NVCC)
 namespace {
 
 EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE float bitwise_and(const float& a,
@@ -211,6 +217,7 @@ EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE double2
 pcmp_eq<double2>(const double2& a, const double2& b) {
   return make_double2(eq_mask(a.x, b.x), eq_mask(a.y, b.y));
 }
+#endif  // EIGEN_CUDA_ARCH || defined(EIGEN_HIP_DEVICE_COMPILE)
 
 template<> EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE float4 plset<float4>(const float& a) {
   return make_float4(a, a+1, a+2, a+3);
@@ -406,6 +413,13 @@ template<> EIGEN_DEVICE_FUNC inline float4  pabs<float4>(const float4& a) {
 }
 template<> EIGEN_DEVICE_FUNC inline double2 pabs<double2>(const double2& a) {
   return make_double2(fabs(a.x), fabs(a.y));
+}
+
+template<> EIGEN_DEVICE_FUNC inline float4  pfloor<float4>(const float4& a) {
+  return make_float4(floorf(a.x), floorf(a.y), floorf(a.z), floorf(a.w));
+}
+template<> EIGEN_DEVICE_FUNC inline double2 pfloor<double2>(const double2& a) {
+  return make_double2(floor(a.x), floor(a.y));
 }
 
 EIGEN_DEVICE_FUNC inline void

@@ -24,12 +24,17 @@ enum {
  */
 /// The make pointer class is used by sycl in order to build the mapper class on the device. For other platform the default make pointer is used which
 /// is scalar * for CoeffLoader.
-template <typename Tensor, bool HasRawAccess, template <class> class MakePointer_ = MakePointer> struct CoeffLoader;
-template<typename Scalar, typename Index, int side, typename Tensor, typename nocontract_t, typename contract_t,
-         int packet_size, bool inner_dim_contiguous, bool inner_dim_reordered, int Alignment,
-         template <class> class MakePointer_ = MakePointer> class BaseTensorContractionMapper;
+template <typename Tensor, bool HasRawAccess, template <class> class MakePointer_ = MakePointer>
+struct CoeffLoader;
 
-template <typename Tensor, bool HasRawAccess, template <class> class MakePointer_> struct CoeffLoader {
+template <typename Scalar, typename Index, int side, typename Tensor,
+          typename nocontract_t, typename contract_t, int packet_size,
+          bool inner_dim_contiguous, bool inner_dim_reordered, int Alignment,
+          template <class> class MakePointer_ = MakePointer>
+class BaseTensorContractionMapper;
+
+template <typename Tensor, bool HasRawAccess, template <class> class MakePointer_>
+struct CoeffLoader {
   enum {
     DirectOffsets = false
   };
@@ -40,6 +45,12 @@ template <typename Tensor, bool HasRawAccess, template <class> class MakePointer
     eigen_assert(false && "unsupported");
   }
 
+  EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE const typename MakePointer_<const typename Tensor::Scalar>::Type
+  data() const {
+    eigen_assert(false && "unsupported");
+    return NULL;
+  }
+
   EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE typename Tensor::Scalar coeff(typename Tensor::Index index) const { return m_tensor.coeff(index); }
 
  template<int LoadMode> EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE
@@ -48,12 +59,12 @@ template <typename Tensor, bool HasRawAccess, template <class> class MakePointer
     return m_tensor.template packet<LoadMode>(index);
   }
 
-
  private:
   const Tensor m_tensor;
 };
 
-template <typename Tensor, template <class> class MakePointer_> struct CoeffLoader<Tensor, true, MakePointer_> {
+template <typename Tensor, template <class> class MakePointer_>
+struct CoeffLoader<Tensor, true, MakePointer_> {
   enum {
     DirectOffsets = true
   };
@@ -62,6 +73,11 @@ template <typename Tensor, template <class> class MakePointer_> struct CoeffLoad
 
   EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE void offsetBuffer(typename Tensor::Index offset) {
     m_data += offset;
+  }
+
+  EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE const typename MakePointer_<const typename Tensor::Scalar>::Type
+  data() const {
+    return m_data;
   }
 
   EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE typename Tensor::Scalar coeff(typename Tensor::Index index) const { return loadConstant(m_data+index); }
@@ -120,6 +136,7 @@ class SimpleTensorContractionMapper {
   EIGEN_DEVICE_FUNC
   EIGEN_STRONG_INLINE Index computeIndex(Index row, Index col) const {
     const bool left = (side == Lhs);
+    EIGEN_UNUSED_VARIABLE(left); // annoying bug in g++8.1: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=85963
     Index nocontract_val = left ? row : col;
     Index linidx = 0;
     for (int i = static_cast<int>(array_size<nocontract_t>::value) - 1; i > 0; i--) {
@@ -158,6 +175,7 @@ class SimpleTensorContractionMapper {
   EIGEN_DEVICE_FUNC
   EIGEN_STRONG_INLINE IndexPair<Index> computeIndexPair(Index row, Index col, const Index distance) const {
     const bool left = (side == Lhs);
+    EIGEN_UNUSED_VARIABLE(left); // annoying bug in g++8.1: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=85963
     Index nocontract_val[2] = {left ? row : col, left ? row + distance : col};
     Index linidx[2] = {0, 0};
     if (array_size<typename Tensor::Dimensions>::value > array_size<contract_t>::value) {
@@ -212,6 +230,17 @@ class SimpleTensorContractionMapper {
     return ((side == Lhs) && inner_dim_contiguous && array_size<contract_t>::value > 0) ? m_contract_strides[0] : 1;
   }
 
+  const CoeffLoader<Tensor, Tensor::RawAccess, MakePointer_>& tensor() const {
+    return m_tensor;
+  }
+
+  const nocontract_t& nocontract_strides() const {
+    return m_nocontract_strides;
+  }
+  const nocontract_t& ij_strides() const { return m_ij_strides; }
+  const contract_t& contract_strides() const { return m_contract_strides; }
+  const contract_t& k_strides() const { return m_k_strides; }
+
  protected:
   CoeffLoader<Tensor, Tensor::RawAccess, MakePointer_> m_tensor;
   const nocontract_t m_nocontract_strides;
@@ -239,8 +268,10 @@ class BaseTensorContractionMapper : public SimpleTensorContractionMapper<Scalar,
   ParentMapper(tensor, nocontract_strides, ij_strides, contract_strides, k_strides) { }
 
   template <typename PacketT,int AlignmentType>
-  EIGEN_DEVICE_FUNC
-  EIGEN_STRONG_INLINE PacketT load(Index i, Index j) const {
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE
+  typename internal::enable_if<internal::unpacket_traits<PacketT>::size==packet_size,PacketT>::type
+  load(Index i, Index j) const
+  {
     // whole method makes column major assumption
 
     // don't need to add offsets for now (because operator handles that)
@@ -277,6 +308,29 @@ class BaseTensorContractionMapper : public SimpleTensorContractionMapper<Scalar,
       data[k + 1] = this->m_tensor.coeff(internal_pair.second);
     }
     data[packet_size - 1] = this->m_tensor.coeff(lastIdx);
+
+    return pload<PacketT>(data);
+  }
+
+  template <typename PacketT,int AlignmentType>
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE
+  typename internal::enable_if<internal::unpacket_traits<PacketT>::size!=packet_size,PacketT>::type
+  load(Index i, Index j) const
+  {
+    const Index requested_packet_size = internal::unpacket_traits<PacketT>::size;
+    EIGEN_ALIGN_MAX Scalar data[requested_packet_size];
+
+    const IndexPair<Index> indexPair = this->computeIndexPair(i, j, requested_packet_size - 1);
+    const Index first = indexPair.first;
+    const Index lastIdx = indexPair.second;
+
+    data[0] = this->m_tensor.coeff(first);
+    for (Index k = 1; k < requested_packet_size - 1; k += 2) {
+      const IndexPair<Index> internal_pair = this->computeIndexPair(i + k, j, 1);
+      data[k] = this->m_tensor.coeff(internal_pair.first);
+      data[k + 1] = this->m_tensor.coeff(internal_pair.second);
+    }
+    data[requested_packet_size - 1] = this->m_tensor.coeff(lastIdx);
 
     return pload<PacketT>(data);
   }
@@ -417,6 +471,10 @@ class TensorContractionSubMapper {
   EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE bool aligned(Index) const {
     return false;
   }
+
+  const ParentMapper& base_mapper() const { return m_base_mapper; }
+  Index vert_offset() const { return m_vert_offset; }
+  Index horiz_offset() const { return m_horiz_offset; }
 
  private:
   ParentMapper m_base_mapper;
